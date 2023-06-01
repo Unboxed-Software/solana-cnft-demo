@@ -34,7 +34,7 @@ async function airdropSolIfNeeded(
     console.log("Airdropping 1 SOL...")
     const airdropSignature = await connection.requestAirdrop(
       signer.publicKey,
-      web3.LAMPORTS_PER_SOL
+      2 * web3.LAMPORTS_PER_SOL
     )
 
     const latestBlockHash = await connection.getLatestBlockhash()
