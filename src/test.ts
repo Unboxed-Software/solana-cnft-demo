@@ -1,4 +1,4 @@
-import { airdropSolIfNeeded, getOrCreateKeypair } from "./utils"
+import { airdropSolIfNeeded, getOrCreateKeypair, heliusApi } from "./utils"
 import {
   PublicKey,
   Connection,
@@ -56,6 +56,9 @@ describe("Compressed NFTs", () => {
   // Output of `metaplex.nfts().create`.
   // Type naming from Metaplex is a bit confusing, this is not a compressed nft
   let collectionNft: CreateCompressedNftOutput
+
+  // assetId parsed from transaction logs
+  let assetId: PublicKey
 
   // Array of compressed nfts for our "collection" returned from Helius API
   let cnfts: any[] = []
@@ -313,7 +316,7 @@ describe("Compressed NFTs", () => {
         } catch (__) {}
       }
 
-      const assetId = await getLeafAssetId(treeAddress, new BN(assetIndex))
+      assetId = await getLeafAssetId(treeAddress, new BN(assetIndex))
       console.log("assetId:", assetId.toBase58())
     } catch (err) {
       console.error("\nFailed to mint compressed NFT:", err)
@@ -321,98 +324,64 @@ describe("Compressed NFTs", () => {
     }
   })
 
-  it("Fetch NFTs and Filter by Collection", async () => {
-    const response = await fetch(rpcUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "my-id",
-        method: "getAssetsByOwner",
-        params: {
-          ownerAddress: payer.publicKey.toBase58(),
-          page: 1, // Starts at 1
-          limit: 1000,
-        },
-      }),
-    })
-
-    const { result } = await response.json()
-
-    // Filter items to only include those from a specific collection.
-    const mintAddress = collectionNft.mintAddress.toBase58()
-    cnfts = result.items?.filter((item) =>
-      item.grouping.some((group) => group.group_value === mintAddress)
-    )
-  })
-
   it("Transfer Compressed NFT", async () => {
-    // Define constants
-    const cnft = cnfts[0]
-    console.log("assetId:", cnft.id)
-    const compression = cnft.compression
-    const treePublicKey = treeKeypair.publicKey
+    // Define asset Id
+    const assetIdBase58 = assetId.toBase58()
 
-    // Fetch the asset proof.
-    const response = await fetch(rpcUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "my-id",
-        method: "getAssetProof",
-        params: { id: cnft.id },
-      }),
-    })
+    // Fetch asset and asset proof data using Helius Digital Asset Standard API
+    const [assetData, assetProofData] = await Promise.all([
+      heliusApi("getAsset", { id: assetIdBase58 }),
+      heliusApi("getAssetProof", { id: assetIdBase58 }),
+    ])
 
-    const { result } = await response.json()
-    // console.log("Assets Proof: ", result)
+    // Extract the required fields from the fetched data
+    const { compression, ownership } = assetData
+    const { proof, root } = assetProofData
 
-    // Fetch the tree account.
+    // Public keys for the tree, owner and delegate
+    const treePublicKey = new PublicKey(compression.tree)
+    const ownerPublicKey = new PublicKey(ownership.owner)
+    const delegatePublicKey = ownership.delegate
+      ? new PublicKey(ownership.delegate)
+      : ownerPublicKey
+
+    // Fetch tree account
     const treeAccount = await ConcurrentMerkleTreeAccount.fromAccountAddress(
       connection,
       treePublicKey
     )
-
-    const ownerPublicKey = new PublicKey(cnft.ownership.owner)
-    const delegatePublicKey = cnft.ownership.delegate
-      ? new PublicKey(cnft.ownership.delegate)
-      : ownerPublicKey
-
-    // Define keys for the new and current leaf owners.
-    const newLeafOwner = testWallet.publicKey
-    const leafOwner = ownerPublicKey
-    const leafDelegate = delegatePublicKey
-
-    // Get the tree authority and canopy depth.
+    // Get the tree authority and canopy depth from the tree account
     const treeAuthority = treeAccount.getAuthority()
-    const canopyDepth = treeAccount.getCanopyDepth() || 0 // default to 0 if undefined.
+    const canopyDepth = treeAccount.getCanopyDepth() || 0
 
-    // Parse the list of proof addresses into a valid AccountMeta[].
-    const proofPath: AccountMeta[] = result.proof
+    // Convert proof to account meta format
+    // These will be used as the remaining accounts for the transfer instruction
+    // Note: may be empty if the tree canopy is large enough
+    const proofPath: AccountMeta[] = proof
       .map((node: string) => ({
         pubkey: new PublicKey(node),
         isSigner: false,
         isWritable: false,
       }))
-      .slice(0, result.proof.length - canopyDepth)
+      .slice(0, proof.length - canopyDepth)
 
-    // Create the transfer instruction.
+    // Determine the new leaf owner
+    const newLeafOwner = testWallet.publicKey
+
+    // Create the transfer instruction
     const transferIx = createTransferInstruction(
       {
         merkleTree: treePublicKey,
         treeAuthority,
-        leafOwner,
-        leafDelegate,
+        leafOwner: ownerPublicKey,
+        leafDelegate: delegatePublicKey,
         newLeafOwner,
         logWrapper: SPL_NOOP_PROGRAM_ID,
         compressionProgram: SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
         anchorRemainingAccounts: proofPath,
       },
       {
-        root: [...new PublicKey(result.root.trim()).toBytes()],
+        root: [...new PublicKey(root.trim()).toBytes()],
         dataHash: [...new PublicKey(compression.data_hash.trim()).toBytes()],
         creatorHash: [
           ...new PublicKey(compression.creator_hash.trim()).toBytes(),
@@ -423,11 +392,10 @@ describe("Compressed NFTs", () => {
       BUBBLEGUM_PROGRAM_ID
     )
 
+    // Try creating and sending the transaction to transfer ownership of the NFT
     try {
-      // create and send the transaction to transfer ownership of the NFT
       const tx = new Transaction().add(transferIx)
       tx.feePayer = payer.publicKey
-
       const txSignature = await sendAndConfirmTransaction(
         connection,
         tx,
@@ -437,7 +405,6 @@ describe("Compressed NFTs", () => {
           skipPreflight: true,
         }
       )
-
       console.log(
         `https://explorer.solana.com/tx/${txSignature}?cluster=devnet`
       )
@@ -446,4 +413,130 @@ describe("Compressed NFTs", () => {
       throw err
     }
   })
+
+  // it("Fetch NFTs and Filter by Collection", async () => {
+  //   const response = await fetch(rpcUrl, {
+  //     method: "POST",
+  //     headers: {
+  //       "Content-Type": "application/json",
+  //     },
+  //     body: JSON.stringify({
+  //       jsonrpc: "2.0",
+  //       id: "my-id",
+  //       method: "getAssetsByOwner",
+  //       params: {
+  //         ownerAddress: payer.publicKey.toBase58(),
+  //         page: 1, // Starts at 1
+  //         limit: 1000,
+  //       },
+  //     }),
+  //   })
+
+  //   const { result } = await response.json()
+
+  //   // Filter items to only include those from a specific collection.
+  //   const mintAddress = collectionNft.mintAddress.toBase58()
+  //   cnfts = result.items?.filter((item) =>
+  //     item.grouping.some((group) => group.group_value === mintAddress)
+  //   )
+  // })
+
+  // it("Transfer Compressed NFT", async () => {
+  //   // Define constants
+  //   const cnft = cnfts[0]
+  //   console.log("assetId:", cnft.id)
+  //   const compression = cnft.compression
+  //   const treePublicKey = treeKeypair.publicKey
+
+  //   // Fetch the asset proof.
+  //   const response = await fetch(rpcUrl, {
+  //     method: "POST",
+  //     headers: { "Content-Type": "application/json" },
+  //     body: JSON.stringify({
+  //       jsonrpc: "2.0",
+  //       id: "my-id",
+  //       method: "getAssetProof",
+  //       params: { id: cnft.id },
+  //     }),
+  //   })
+
+  //   const { result } = await response.json()
+  //   // console.log("Assets Proof: ", result)
+
+  //   // Fetch the tree account.
+  //   const treeAccount = await ConcurrentMerkleTreeAccount.fromAccountAddress(
+  //     connection,
+  //     treePublicKey
+  //   )
+
+  //   const ownerPublicKey = new PublicKey(cnft.ownership.owner)
+  //   const delegatePublicKey = cnft.ownership.delegate
+  //     ? new PublicKey(cnft.ownership.delegate)
+  //     : ownerPublicKey
+
+  //   // Define keys for the new and current leaf owners.
+  //   const newLeafOwner = testWallet.publicKey
+  //   const leafOwner = ownerPublicKey
+  //   const leafDelegate = delegatePublicKey
+
+  //   // Get the tree authority and canopy depth.
+  //   const treeAuthority = treeAccount.getAuthority()
+  //   const canopyDepth = treeAccount.getCanopyDepth() || 0 // default to 0 if undefined.
+
+  //   // Parse the list of proof addresses into a valid AccountMeta[].
+  //   const proofPath: AccountMeta[] = result.proof
+  //     .map((node: string) => ({
+  //       pubkey: new PublicKey(node),
+  //       isSigner: false,
+  //       isWritable: false,
+  //     }))
+  //     .slice(0, result.proof.length - canopyDepth)
+
+  //   // Create the transfer instruction.
+  //   const transferIx = createTransferInstruction(
+  //     {
+  //       merkleTree: treePublicKey,
+  //       treeAuthority,
+  //       leafOwner,
+  //       leafDelegate,
+  //       newLeafOwner,
+  //       logWrapper: SPL_NOOP_PROGRAM_ID,
+  //       compressionProgram: SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
+  //       anchorRemainingAccounts: proofPath,
+  //     },
+  //     {
+  //       root: [...new PublicKey(result.root.trim()).toBytes()],
+  //       dataHash: [...new PublicKey(compression.data_hash.trim()).toBytes()],
+  //       creatorHash: [
+  //         ...new PublicKey(compression.creator_hash.trim()).toBytes(),
+  //       ],
+  //       nonce: compression.leaf_id,
+  //       index: compression.leaf_id,
+  //     },
+  //     BUBBLEGUM_PROGRAM_ID
+  //   )
+
+  //   try {
+  //     // create and send the transaction to transfer ownership of the NFT
+  //     const tx = new Transaction().add(transferIx)
+  //     tx.feePayer = payer.publicKey
+
+  //     const txSignature = await sendAndConfirmTransaction(
+  //       connection,
+  //       tx,
+  //       [payer],
+  //       {
+  //         commitment: "confirmed",
+  //         skipPreflight: true,
+  //       }
+  //     )
+
+  //     console.log(
+  //       `https://explorer.solana.com/tx/${txSignature}?cluster=devnet`
+  //     )
+  //   } catch (err: any) {
+  //     console.error("\nFailed to transfer nft:", err)
+  //     throw err
+  //   }
+  // })
 })

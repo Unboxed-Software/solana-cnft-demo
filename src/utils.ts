@@ -1,5 +1,6 @@
 import * as web3 from "@solana/web3.js"
 import * as fs from "fs"
+import fetch from "node-fetch"
 import dotenv from "dotenv"
 dotenv.config()
 
@@ -63,4 +64,19 @@ export async function airdropSolIfNeeded(publicKey: web3.PublicKey) {
       console.log("Airdrop Unsuccessful, likely rate-limited. Try again later.")
     }
   }
+}
+
+export async function heliusApi(method, params) {
+  const response = await fetch(process.env.RPC_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "my-id",
+      method,
+      params,
+    }),
+  })
+  const { result } = await response.json()
+  return result
 }
