@@ -1,4 +1,4 @@
-import { initializeKeypair } from "./initializeKeypair"
+import { airdropSolIfNeeded, getOrCreateKeypair } from "./utils"
 import {
   PublicKey,
   Connection,
@@ -6,6 +6,7 @@ import {
   sendAndConfirmTransaction,
   Transaction,
   AccountMeta,
+  clusterApiUrl,
 } from "@solana/web3.js"
 import {
   SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
@@ -37,21 +38,37 @@ import base58 from "bs58"
 import { BN } from "bn.js"
 
 describe("Compressed NFTs", () => {
+  // Helius devnet RPC URL
   const rpcUrl = process.env.RPC_URL
+
+  // Connection to the devnet cluster
   const connection = new Connection(rpcUrl, "confirmed")
+
+  // New keypair that will be used to create the tree account
   const treeKeypair = Keypair.generate()
 
+  // Keypair used as payer for transactions
   let payer: Keypair
 
+  // Keypair used to test cnft transfers
+  let testWallet: Keypair
+
   // Output of `metaplex.nfts().create`.
-  // Type naming is a bit confusing, not a compressed nft
+  // Type naming from Metaplex is a bit confusing, this is not a compressed nft
   let collectionNft: CreateCompressedNftOutput
 
+  // Array of compressed nfts for our "collection" returned from Helius API
   let cnfts: any[] = []
 
   before(async () => {
-    payer = await initializeKeypair(connection)
+    // Create payer wallet if it doesn't exist and airdrop SOL to it
+    payer = await getOrCreateKeypair("Wallet_1")
+    await airdropSolIfNeeded(payer.publicKey)
 
+    // Create test wallet if it doesn't exist
+    testWallet = await getOrCreateKeypair("Wallet_2")
+
+    // Create Metaplex instance using payer as identity
     const metaplex = new Metaplex(connection).use(keypairIdentity(payer))
 
     // Create a regular collection NFT using Metaplex
@@ -70,6 +87,8 @@ describe("Compressed NFTs", () => {
 
   it("Create Tree", async () => {
     // Define our tree size parameters
+    // Must be a valid predefined pair from `ValidDepthSizePair`
+    // For demonstration purposes, we will use the smallest tree
     const maxDepthSizePair: ValidDepthSizePair = {
       maxDepth: 3, // 2^maxDepth = maximum number of nodes in the tree
       maxBufferSize: 8, // determines maximum number of concurrent updates that can be applied to the tree in a single slot
@@ -78,6 +97,7 @@ describe("Compressed NFTs", () => {
     // Determine the amount of proof stored on chain
     // Larger canopyDepth means more proof is stored on chain and cost more SOL to initialize the tree
     // But less of the proof needs to be provided by the client as remaining accounts in an instruction
+    // Max canopyDepth is 17, which is limited by the maximum size allowed for an account
     const canopyDepth = 0
 
     // For the Bubblegum program, the tree authority is a program derived address using the tree account address as the seed
@@ -87,7 +107,11 @@ describe("Compressed NFTs", () => {
       BUBBLEGUM_PROGRAM_ID
     )
 
-    // Instruction to create a new account with the space required for the tree
+    // Instruction to create a new account with the space required for the tree account
+    // `createAccount` instruction from System program
+
+    // The account is initially created this way instead of in the Bubblegum program
+    // "because these accounts can be quite large, and over the limit for what you can allocate via CPI"
     const allocTreeIx = await createAllocTreeIx(
       connection,
       treeKeypair.publicKey, // The address of the tree account to create
@@ -96,20 +120,30 @@ describe("Compressed NFTs", () => {
       canopyDepth // The amount of proof stored on chain
     )
 
-    // Instruction to initialize the tree
+    // Instruction to initialize the `TreeConfig` account (treeAuthority PDA), and the `MerkleTree` account (via a CPI call to the SPL Compression program)
+    // `createTree` instruction from the Bubblegum program
+
+    // The `TreeConfig` account stores the configuration of the tree
+    // pub struct TreeConfig {
+    //     pub tree_creator: Pubkey,
+    //     pub tree_delegate: Pubkey,
+    //     pub total_mint_capacity: u64,
+    //     pub num_minted: u64,
+    //     pub is_public: bool,
+    //  }
     const createTreeIx = createCreateTreeInstruction(
       {
-        treeAuthority,
-        merkleTree: treeKeypair.publicKey,
-        payer: payer.publicKey,
-        treeCreator: payer.publicKey,
+        treeAuthority, // The `TreeConfig` account that is being initialized
+        merkleTree: treeKeypair.publicKey, // An existing System account with space for the tree, the `MerkleTree` account is then initialized using this account via a CPI call to the SPL Compression program
+        payer: payer.publicKey, // The account that will pay for the transaction
+        treeCreator: payer.publicKey, // The account stored in the `TreeConfig` account as the `tree_creator`
         logWrapper: SPL_NOOP_PROGRAM_ID,
         compressionProgram: SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
       },
       {
         maxBufferSize: maxDepthSizePair.maxBufferSize,
         maxDepth: maxDepthSizePair.maxDepth,
-        public: false, // Whether the tree is public or private, public trees allow anyone to update the tree
+        public: false, // If true, anyone can "mint" to the tree. If false, only the tree delegate or tree creator can "mint" to the tree
       },
       BUBBLEGUM_PROGRAM_ID
     )
@@ -143,7 +177,7 @@ describe("Compressed NFTs", () => {
   })
 
   it("Mint Compressed NFT to Tree", async () => {
-    // Tree address of the tree created previously
+    // Tree address of the tree account initialized previously
     const treeAddress = treeKeypair.publicKey
 
     // Define the mint address, metadata address, and master edition address of the "collection" NFT
@@ -169,13 +203,14 @@ describe("Compressed NFTs", () => {
       tokenStandard: TokenStandard.NonFungible,
     }
 
-    // Derive the tree authority
+    // Derive the tree authority PDA ('TreeConfig' account for the tree account)
     const [treeAuthority] = PublicKey.findProgramAddressSync(
       [treeAddress.toBuffer()],
       BUBBLEGUM_PROGRAM_ID
     )
 
-    // Derive the bubblegum signer
+    // Derive the bubblegum signer, used by the Bubblegum program to handle "collection verification"
+    // Only used for `createMintToCollectionV1` instruction
     const [bubblegumSigner] = PublicKey.findProgramAddressSync(
       [Buffer.from("collection_cpi", "utf8")],
       BUBBLEGUM_PROGRAM_ID
@@ -187,11 +222,11 @@ describe("Compressed NFTs", () => {
         payer: payer.publicKey, // The account that will pay for the transaction
         merkleTree: treeAddress, // The address of the tree account
         treeAuthority, // The authority of the tree account, should be a PDA derived from the tree account address
-        treeDelegate: payer.publicKey,
-        leafOwner: payer.publicKey, // The owner of the compressed NFT
-        leafDelegate: payer.publicKey,
-        collectionAuthority: payer.publicKey,
-        collectionAuthorityRecordPda: BUBBLEGUM_PROGRAM_ID,
+        treeDelegate: payer.publicKey, // The delegate of the tree account, should be the same as the tree creator by default
+        leafOwner: payer.publicKey, // The owner of the compressed NFT being minted to the tree
+        leafDelegate: payer.publicKey, // The delegate of the compressed NFT being minted to the tree
+        collectionAuthority: payer.publicKey, // The authority of the "collection" NFT
+        collectionAuthorityRecordPda: BUBBLEGUM_PROGRAM_ID, // Not sure what this is used for, by default uses Bubblegum program id
         collectionMint: collectionDetails.mint, // The mint of the "collection" NFT
         collectionMetadata: collectionDetails.metadata, // The metadata of the "collection" NFT
         editionAccount: collectionDetails.masterEditionAccount, // The master edition of the "collection" NFT
@@ -286,129 +321,129 @@ describe("Compressed NFTs", () => {
     }
   })
 
-  // it("Fetch NFTs and Filter by Collection", async () => {
-  //   const response = await fetch(rpcUrl, {
-  //     method: "POST",
-  //     headers: {
-  //       "Content-Type": "application/json",
-  //     },
-  //     body: JSON.stringify({
-  //       jsonrpc: "2.0",
-  //       id: "my-id",
-  //       method: "getAssetsByOwner",
-  //       params: {
-  //         ownerAddress: payer.publicKey.toBase58(),
-  //         page: 1, // Starts at 1
-  //         limit: 1000,
-  //       },
-  //     }),
-  //   })
+  it("Fetch NFTs and Filter by Collection", async () => {
+    const response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "my-id",
+        method: "getAssetsByOwner",
+        params: {
+          ownerAddress: payer.publicKey.toBase58(),
+          page: 1, // Starts at 1
+          limit: 1000,
+        },
+      }),
+    })
 
-  //   const { result } = await response.json()
+    const { result } = await response.json()
 
-  //   // Filter items to only include those from a specific collection.
-  //   const mintAddress = collectionNft.mintAddress.toBase58()
-  //   cnfts = result.items?.filter((item) =>
-  //     item.grouping.some((group) => group.group_value === mintAddress)
-  //   )
-  // })
+    // Filter items to only include those from a specific collection.
+    const mintAddress = collectionNft.mintAddress.toBase58()
+    cnfts = result.items?.filter((item) =>
+      item.grouping.some((group) => group.group_value === mintAddress)
+    )
+  })
 
-  // it("Transfer Compressed NFT", async () => {
-  //   // Define constants
-  //   const cnft = cnfts[0]
-  //   console.log("assetId:", cnft.id)
-  //   const compression = cnft.compression
-  //   const treePublicKey = treeKeypair.publicKey
+  it("Transfer Compressed NFT", async () => {
+    // Define constants
+    const cnft = cnfts[0]
+    console.log("assetId:", cnft.id)
+    const compression = cnft.compression
+    const treePublicKey = treeKeypair.publicKey
 
-  //   // Fetch the asset proof.
-  //   const response = await fetch(rpcUrl, {
-  //     method: "POST",
-  //     headers: { "Content-Type": "application/json" },
-  //     body: JSON.stringify({
-  //       jsonrpc: "2.0",
-  //       id: "my-id",
-  //       method: "getAssetProof",
-  //       params: { id: cnft.id },
-  //     }),
-  //   })
+    // Fetch the asset proof.
+    const response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "my-id",
+        method: "getAssetProof",
+        params: { id: cnft.id },
+      }),
+    })
 
-  //   const { result } = await response.json()
-  //   // console.log("Assets Proof: ", result)
+    const { result } = await response.json()
+    // console.log("Assets Proof: ", result)
 
-  //   // Fetch the tree account.
-  //   const treeAccount = await ConcurrentMerkleTreeAccount.fromAccountAddress(
-  //     connection,
-  //     treePublicKey
-  //   )
+    // Fetch the tree account.
+    const treeAccount = await ConcurrentMerkleTreeAccount.fromAccountAddress(
+      connection,
+      treePublicKey
+    )
 
-  //   const ownerPublicKey = new PublicKey(cnft.ownership.owner)
-  //   const delegatePublicKey = cnft.ownership.delegate
-  //     ? new PublicKey(cnft.ownership.delegate)
-  //     : ownerPublicKey
+    const ownerPublicKey = new PublicKey(cnft.ownership.owner)
+    const delegatePublicKey = cnft.ownership.delegate
+      ? new PublicKey(cnft.ownership.delegate)
+      : ownerPublicKey
 
-  //   // Define keys for the new and current leaf owners.
-  //   // const newLeafOwner = Keypair.generate().publicKey
-  //   const leafOwner = ownerPublicKey
-  //   const leafDelegate = delegatePublicKey
+    // Define keys for the new and current leaf owners.
+    const newLeafOwner = testWallet.publicKey
+    const leafOwner = ownerPublicKey
+    const leafDelegate = delegatePublicKey
 
-  //   // Get the tree authority and canopy depth.
-  //   const treeAuthority = treeAccount.getAuthority()
-  //   const canopyDepth = treeAccount.getCanopyDepth() || 0 // default to 0 if undefined.
+    // Get the tree authority and canopy depth.
+    const treeAuthority = treeAccount.getAuthority()
+    const canopyDepth = treeAccount.getCanopyDepth() || 0 // default to 0 if undefined.
 
-  //   // Parse the list of proof addresses into a valid AccountMeta[].
-  //   const proofPath: AccountMeta[] = result.proof
-  //     .map((node: string) => ({
-  //       pubkey: new PublicKey(node),
-  //       isSigner: false,
-  //       isWritable: false,
-  //     }))
-  //     .slice(0, result.proof.length - canopyDepth)
+    // Parse the list of proof addresses into a valid AccountMeta[].
+    const proofPath: AccountMeta[] = result.proof
+      .map((node: string) => ({
+        pubkey: new PublicKey(node),
+        isSigner: false,
+        isWritable: false,
+      }))
+      .slice(0, result.proof.length - canopyDepth)
 
-  //   // Create the transfer instruction.
-  //   const transferIx = createTransferInstruction(
-  //     {
-  //       merkleTree: treePublicKey,
-  //       treeAuthority,
-  //       leafOwner,
-  //       leafDelegate,
-  //       newLeafOwner: payer.publicKey, // transfer to self for testing
-  //       logWrapper: SPL_NOOP_PROGRAM_ID,
-  //       compressionProgram: SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
-  //       anchorRemainingAccounts: proofPath,
-  //     },
-  //     {
-  //       root: [...new PublicKey(result.root.trim()).toBytes()],
-  //       dataHash: [...new PublicKey(compression.data_hash.trim()).toBytes()],
-  //       creatorHash: [
-  //         ...new PublicKey(compression.creator_hash.trim()).toBytes(),
-  //       ],
-  //       nonce: compression.leaf_id,
-  //       index: compression.leaf_id,
-  //     },
-  //     BUBBLEGUM_PROGRAM_ID
-  //   )
+    // Create the transfer instruction.
+    const transferIx = createTransferInstruction(
+      {
+        merkleTree: treePublicKey,
+        treeAuthority,
+        leafOwner,
+        leafDelegate,
+        newLeafOwner,
+        logWrapper: SPL_NOOP_PROGRAM_ID,
+        compressionProgram: SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
+        anchorRemainingAccounts: proofPath,
+      },
+      {
+        root: [...new PublicKey(result.root.trim()).toBytes()],
+        dataHash: [...new PublicKey(compression.data_hash.trim()).toBytes()],
+        creatorHash: [
+          ...new PublicKey(compression.creator_hash.trim()).toBytes(),
+        ],
+        nonce: compression.leaf_id,
+        index: compression.leaf_id,
+      },
+      BUBBLEGUM_PROGRAM_ID
+    )
 
-  //   try {
-  //     // create and send the transaction to transfer ownership of the NFT
-  //     const tx = new Transaction().add(transferIx)
-  //     tx.feePayer = payer.publicKey
+    try {
+      // create and send the transaction to transfer ownership of the NFT
+      const tx = new Transaction().add(transferIx)
+      tx.feePayer = payer.publicKey
 
-  //     const txSignature = await sendAndConfirmTransaction(
-  //       connection,
-  //       tx,
-  //       [payer],
-  //       {
-  //         commitment: "confirmed",
-  //         skipPreflight: true,
-  //       }
-  //     )
+      const txSignature = await sendAndConfirmTransaction(
+        connection,
+        tx,
+        [payer],
+        {
+          commitment: "confirmed",
+          skipPreflight: true,
+        }
+      )
 
-  //     console.log(
-  //       `https://explorer.solana.com/tx/${txSignature}?cluster=devnet`
-  //     )
-  //   } catch (err: any) {
-  //     console.error("\nFailed to transfer nft:", err)
-  //     throw err
-  //   }
-  // })
+      console.log(
+        `https://explorer.solana.com/tx/${txSignature}?cluster=devnet`
+      )
+    } catch (err: any) {
+      console.error("\nFailed to transfer nft:", err)
+      throw err
+    }
+  })
 })
