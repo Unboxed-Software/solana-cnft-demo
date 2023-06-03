@@ -66,6 +66,40 @@ export async function airdropSolIfNeeded(publicKey: web3.PublicKey) {
   }
 }
 
+export async function transferSolIfNeeded(
+  sender: web3.Keypair,
+  receiver: web3.Keypair
+) {
+  const connection = new web3.Connection(
+    web3.clusterApiUrl("devnet"),
+    "confirmed"
+  )
+
+  const balance = await connection.getBalance(receiver.publicKey)
+  console.log("Current balance is", balance / web3.LAMPORTS_PER_SOL)
+
+  if (balance < 0.5 * web3.LAMPORTS_PER_SOL) {
+    try {
+      let ix = web3.SystemProgram.transfer({
+        fromPubkey: sender.publicKey,
+        toPubkey: receiver.publicKey,
+        lamports: web3.LAMPORTS_PER_SOL,
+      })
+
+      await web3.sendAndConfirmTransaction(
+        connection,
+        new web3.Transaction().add(ix),
+        [sender]
+      )
+
+      const newBalance = await connection.getBalance(receiver.publicKey)
+      console.log("New balance is", newBalance / web3.LAMPORTS_PER_SOL)
+    } catch (e) {
+      console.log("SOL Transfer Unsuccessful")
+    }
+  }
+}
+
 export async function heliusApi(method, params) {
   const response = await fetch(process.env.RPC_URL, {
     method: "POST",

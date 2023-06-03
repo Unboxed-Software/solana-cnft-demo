@@ -1,4 +1,9 @@
-import { airdropSolIfNeeded, getOrCreateKeypair, heliusApi } from "./utils"
+import {
+  airdropSolIfNeeded,
+  getOrCreateKeypair,
+  heliusApi,
+  transferSolIfNeeded,
+} from "./utils"
 import {
   PublicKey,
   Connection,
@@ -23,7 +28,9 @@ import {
   TokenStandard,
   createCreateTreeInstruction,
   createMintToCollectionV1Instruction,
+  createMintV1Instruction,
   createTransferInstruction,
+  createBurnInstruction,
   getLeafAssetId,
 } from "@metaplex-foundation/mpl-bubblegum"
 import { PROGRAM_ID as TOKEN_METADATA_PROGRAM_ID } from "@metaplex-foundation/mpl-token-metadata"
@@ -36,6 +43,7 @@ import {
 import fetch from "node-fetch"
 import base58 from "bs58"
 import { BN } from "bn.js"
+import { burn, transfer } from "@solana/spl-token"
 
 describe("Compressed NFTs", () => {
   // Helius devnet RPC URL
@@ -57,8 +65,11 @@ describe("Compressed NFTs", () => {
   // Type naming from Metaplex is a bit confusing, this is not a compressed nft
   let collectionNft: CreateCompressedNftOutput
 
-  // assetId parsed from transaction logs
-  let assetId: PublicKey
+  // assetId parsed from transaction logs, used for transfer test
+  let assetId_1: PublicKey
+
+  // assetId parsed from transaction logs, used for burn test
+  let assetId_2: PublicKey
 
   // Array of compressed nfts for our "collection" returned from Helius API
   let cnfts: any[] = []
@@ -66,10 +77,15 @@ describe("Compressed NFTs", () => {
   before(async () => {
     // Create payer wallet if it doesn't exist and airdrop SOL to it
     payer = await getOrCreateKeypair("Wallet_1")
+
+    // Airdrop SOL to payer wallet if needed
     await airdropSolIfNeeded(payer.publicKey)
 
     // Create test wallet if it doesn't exist
     testWallet = await getOrCreateKeypair("Wallet_2")
+
+    // Transfer SOL to test wallet if needed, can't airdrop twice in a row on devnet without getting rate limited
+    await transferSolIfNeeded(payer, testWallet)
 
     // Create Metaplex instance using payer as identity
     const metaplex = new Metaplex(connection).use(keypairIdentity(payer))
@@ -180,6 +196,128 @@ describe("Compressed NFTs", () => {
   })
 
   it("Mint Compressed NFT to Tree", async () => {
+    // Tree address of the tree account initialized previously
+    const treeAddress = treeKeypair.publicKey
+
+    // Compressed NFT Metadata
+    const compressedNFTMetadata: MetadataArgs = {
+      name: "CNFT",
+      symbol: "CNFT",
+      uri: "https://madlads.s3.us-west-2.amazonaws.com/json/8566.json",
+      creators: [{ address: payer.publicKey, verified: false, share: 100 }],
+      editionNonce: 0,
+      uses: null,
+      collection: null,
+      primarySaleHappened: false,
+      sellerFeeBasisPoints: 0,
+      isMutable: false,
+      tokenProgramVersion: TokenProgramVersion.Original,
+      tokenStandard: TokenStandard.NonFungible,
+    }
+
+    // Derive the tree authority PDA ('TreeConfig' account for the tree account)
+    const [treeAuthority] = PublicKey.findProgramAddressSync(
+      [treeAddress.toBuffer()],
+      BUBBLEGUM_PROGRAM_ID
+    )
+
+    // Create the instruction to "mint" the compressed NFT to the tree
+    const mintIx = createMintV1Instruction(
+      {
+        payer: payer.publicKey, // The account that will pay for the transaction
+        merkleTree: treeAddress, // The address of the tree account
+        treeAuthority, // The authority of the tree account, should be a PDA derived from the tree account address
+        treeDelegate: payer.publicKey, // The delegate of the tree account, should be the same as the tree creator by default
+        leafOwner: payer.publicKey, // The owner of the compressed NFT being minted to the tree
+        leafDelegate: payer.publicKey, // The delegate of the compressed NFT being minted to the tree
+        compressionProgram: SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
+        logWrapper: SPL_NOOP_PROGRAM_ID,
+      },
+      {
+        message: Object.assign(compressedNFTMetadata),
+      }
+    )
+
+    try {
+      // Create new transaction and add the instruction
+      const tx = new Transaction().add(mintIx)
+
+      // Set the fee payer for the transaction
+      tx.feePayer = payer.publicKey
+
+      // Send the transaction
+      const txSignature = await sendAndConfirmTransaction(
+        connection,
+        tx,
+        [payer],
+        { commitment: "confirmed", skipPreflight: true }
+      )
+
+      console.log(
+        `https://explorer.solana.com/tx/${txSignature}?cluster=devnet`
+      )
+
+      // get the transaction info using the tx signature
+      const txInfo = await connection.getTransaction(txSignature, {
+        maxSupportedTransactionVersion: 0,
+      })
+
+      // Function to check the program Id of an instruction
+      const isProgramId = (instruction, programId) =>
+        txInfo?.transaction.message.staticAccountKeys[
+          instruction.programIdIndex
+        ].toBase58() === programId
+
+      // Find the index of the bubblegum instruction
+      const relevantIndex =
+        txInfo!.transaction.message.compiledInstructions.findIndex(
+          (instruction) =>
+            isProgramId(instruction, BUBBLEGUM_PROGRAM_ID.toBase58())
+        )
+
+      // If there's no matching Bubblegum instruction, exit
+      if (relevantIndex < 0) {
+        return
+      }
+
+      // Get the inner instructions related to the bubblegum instruction
+      const relevantInnerInstructions =
+        txInfo!.meta?.innerInstructions?.[relevantIndex].instructions
+
+      // Filter out the instructions that aren't no-ops
+      const relevantInnerIxs = relevantInnerInstructions.filter((instruction) =>
+        isProgramId(instruction, SPL_NOOP_PROGRAM_ID.toBase58())
+      )
+
+      // Locate the asset index by attempting to locate and parse the correct `relevantInnerIx`
+      let assetIndex
+      // Note: the `assetIndex` is expected to be at position `1`, and we normally expect only 2 `relevantInnerIx`
+      for (let i = relevantInnerIxs.length - 1; i >= 0; i--) {
+        try {
+          // Try to decode and deserialize the instruction
+          const changeLogEvent = deserializeChangeLogEventV1(
+            Buffer.from(base58.decode(relevantInnerIxs[i]?.data!))
+          )
+
+          // extract a successful changelog index
+          assetIndex = changeLogEvent?.index
+
+          // If we got a valid index, no need to continue the loop
+          if (assetIndex !== undefined) {
+            break
+          }
+        } catch (__) {}
+      }
+
+      assetId_1 = await getLeafAssetId(treeAddress, new BN(assetIndex))
+      console.log("assetId:", assetId_1.toBase58())
+    } catch (err) {
+      console.error("\nFailed to mint compressed NFT:", err)
+      throw err
+    }
+  })
+
+  it("Mint Compressed NFT to Tree as part of Collection", async () => {
     // Tree address of the tree account initialized previously
     const treeAddress = treeKeypair.publicKey
 
@@ -316,8 +454,8 @@ describe("Compressed NFTs", () => {
         } catch (__) {}
       }
 
-      assetId = await getLeafAssetId(treeAddress, new BN(assetIndex))
-      console.log("assetId:", assetId.toBase58())
+      assetId_2 = await getLeafAssetId(treeAddress, new BN(assetIndex))
+      console.log("assetId:", assetId_2.toBase58())
     } catch (err) {
       console.error("\nFailed to mint compressed NFT:", err)
       throw err
@@ -326,7 +464,7 @@ describe("Compressed NFTs", () => {
 
   it("Transfer Compressed NFT", async () => {
     // Define asset Id
-    const assetIdBase58 = assetId.toBase58()
+    const assetIdBase58 = assetId_1.toBase58()
 
     // Fetch asset and asset proof data using Helius Digital Asset Standard API
     const [assetData, assetProofData] = await Promise.all([
@@ -395,6 +533,92 @@ describe("Compressed NFTs", () => {
     // Try creating and sending the transaction to transfer ownership of the NFT
     try {
       const tx = new Transaction().add(transferIx)
+      tx.feePayer = payer.publicKey
+      const txSignature = await sendAndConfirmTransaction(
+        connection,
+        tx,
+        [payer],
+        {
+          commitment: "confirmed",
+          skipPreflight: true,
+        }
+      )
+      console.log(
+        `https://explorer.solana.com/tx/${txSignature}?cluster=devnet`
+      )
+    } catch (err: any) {
+      console.error("\nFailed to transfer nft:", err)
+      throw err
+    }
+  })
+
+  it("Burn Compressed NFT", async () => {
+    // Define asset Id
+    const assetIdBase58 = assetId_2.toBase58()
+
+    // Fetch asset and asset proof data using Helius Digital Asset Standard API
+    const [assetData, assetProofData] = await Promise.all([
+      heliusApi("getAsset", { id: assetIdBase58 }),
+      heliusApi("getAssetProof", { id: assetIdBase58 }),
+    ])
+
+    // Extract the required fields from the fetched data
+    const { compression, ownership } = assetData
+    const { proof, root } = assetProofData
+
+    // Public keys for the tree, owner and delegate
+    const treePublicKey = new PublicKey(compression.tree)
+    const ownerPublicKey = new PublicKey(ownership.owner)
+    const delegatePublicKey = ownership.delegate
+      ? new PublicKey(ownership.delegate)
+      : ownerPublicKey
+
+    // Fetch tree account
+    const treeAccount = await ConcurrentMerkleTreeAccount.fromAccountAddress(
+      connection,
+      treePublicKey
+    )
+    // Get the tree authority and canopy depth from the tree account
+    const treeAuthority = treeAccount.getAuthority()
+    const canopyDepth = treeAccount.getCanopyDepth() || 0
+
+    // Convert proof to account meta format
+    // These will be used as the remaining accounts for the transfer instruction
+    // Note: may be empty if the tree canopy is large enough
+    const proofPath: AccountMeta[] = proof
+      .map((node: string) => ({
+        pubkey: new PublicKey(node),
+        isSigner: false,
+        isWritable: false,
+      }))
+      .slice(0, proof.length - canopyDepth)
+
+    // Create the burn instruction
+    const burnIx = createBurnInstruction(
+      {
+        treeAuthority,
+        leafOwner: ownerPublicKey,
+        leafDelegate: delegatePublicKey,
+        merkleTree: treePublicKey,
+        logWrapper: SPL_NOOP_PROGRAM_ID,
+        compressionProgram: SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
+        anchorRemainingAccounts: proofPath,
+      },
+      {
+        root: [...new PublicKey(root.trim()).toBytes()],
+        dataHash: [...new PublicKey(compression.data_hash.trim()).toBytes()],
+        creatorHash: [
+          ...new PublicKey(compression.creator_hash.trim()).toBytes(),
+        ],
+        nonce: compression.leaf_id,
+        index: compression.leaf_id,
+      },
+      BUBBLEGUM_PROGRAM_ID
+    )
+
+    // Try creating and sending the transaction to transfer ownership of the NFT
+    try {
+      const tx = new Transaction().add(burnIx)
       tx.feePayer = payer.publicKey
       const txSignature = await sendAndConfirmTransaction(
         connection,
