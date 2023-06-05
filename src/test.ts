@@ -43,7 +43,6 @@ import {
 import fetch from "node-fetch"
 import base58 from "bs58"
 import { BN } from "bn.js"
-import { burn, transfer } from "@solana/spl-token"
 
 describe("Compressed NFTs", () => {
   // Helius devnet RPC URL
@@ -84,8 +83,8 @@ describe("Compressed NFTs", () => {
     // Create test wallet if it doesn't exist
     testWallet = await getOrCreateKeypair("Wallet_2")
 
-    // Transfer SOL to test wallet if needed, can't airdrop twice in a row on devnet without getting rate limited
-    await transferSolIfNeeded(payer, testWallet)
+    // // Transfer SOL to test wallet if needed, can't airdrop twice in a row on devnet without getting rate limited
+    // await transferSolIfNeeded(payer, testWallet)
 
     // Create Metaplex instance using payer as identity
     const metaplex = new Metaplex(connection).use(keypairIdentity(payer))
@@ -102,6 +101,8 @@ describe("Compressed NFTs", () => {
       isMutable: true,
       isCollection: true,
     })
+
+    console.log("\n")
   })
 
   it("Create Tree", async () => {

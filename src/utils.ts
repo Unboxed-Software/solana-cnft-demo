@@ -1,50 +1,66 @@
-import * as web3 from "@solana/web3.js"
+import {
+  Connection,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  clusterApiUrl,
+} from "@solana/web3.js"
+
 import * as fs from "fs"
 import fetch from "node-fetch"
 import dotenv from "dotenv"
+import {
+  SystemProgram,
+  Transaction,
+  sendAndConfirmTransaction,
+} from "@solana/web3.js"
 dotenv.config()
 
-export async function getOrCreateKeypair(
-  walletName: string
-): Promise<web3.Keypair> {
-  let keypair: web3.Keypair
+// This function will return an existing keypair if it's present in the environment variables, or generate a new one if not
+export async function getOrCreateKeypair(walletName: string): Promise<Keypair> {
+  // Check if secretKey for `walletName` exist in .env file
+  const envWalletKey = process.env[walletName]
 
-  const privateKeyEnvironmentVariable = `${walletName}_PRIVATE_KEY`
-  if (!process.env[privateKeyEnvironmentVariable]) {
+  let keypair: Keypair
+
+  // If no secretKey exist in the .env file for `walletName`
+  if (!envWalletKey) {
     console.log(`Writing ${walletName} keypair to .env file...`)
-    keypair = web3.Keypair.generate()
+
+    // Generate a new keypair
+    keypair = Keypair.generate()
+
+    // Save to .env file
     fs.appendFileSync(
       ".env",
-      `\n${privateKeyEnvironmentVariable}=[${keypair.secretKey.toString()}]\n`
+      `\n${walletName}=${JSON.stringify(Array.from(keypair.secretKey))}`
     )
-  } else {
-    const secret = JSON.parse(
-      process.env[privateKeyEnvironmentVariable] ?? ""
-    ) as number[]
-    const secretKey = Uint8Array.from(secret)
-    keypair = web3.Keypair.fromSecretKey(secretKey)
+  }
+  // If secretKey already exists in the .env file
+  else {
+    // Create a Keypair from the secretKey
+    const secretKey = new Uint8Array(JSON.parse(envWalletKey))
+    keypair = Keypair.fromSecretKey(secretKey)
   }
 
-  console.log(`${walletName} PublicKey:`, keypair.publicKey.toBase58())
+  // Log public key and return the keypair
+  console.log(`${walletName} PublicKey: ${keypair.publicKey.toBase58()}`)
   return keypair
 }
 
-export async function airdropSolIfNeeded(publicKey: web3.PublicKey) {
-  const connection = new web3.Connection(
-    web3.clusterApiUrl("devnet"),
-    "confirmed"
-  )
+export async function airdropSolIfNeeded(publicKey: PublicKey) {
+  const connection = new Connection(clusterApiUrl("devnet"), "confirmed")
 
   const balance = await connection.getBalance(publicKey)
-  console.log("Current balance is", balance / web3.LAMPORTS_PER_SOL)
+  console.log("Current balance is", balance / LAMPORTS_PER_SOL)
 
-  if (balance < 1 * web3.LAMPORTS_PER_SOL) {
+  if (balance < 1 * LAMPORTS_PER_SOL) {
     try {
       console.log("Airdropping 2 SOL...")
 
       const txSignature = await connection.requestAirdrop(
         publicKey,
-        2 * web3.LAMPORTS_PER_SOL
+        2 * LAMPORTS_PER_SOL
       )
 
       const latestBlockHash = await connection.getLatestBlockhash()
@@ -59,41 +75,33 @@ export async function airdropSolIfNeeded(publicKey: web3.PublicKey) {
       )
 
       const newBalance = await connection.getBalance(publicKey)
-      console.log("New balance is", newBalance / web3.LAMPORTS_PER_SOL)
+      console.log("New balance is", newBalance / LAMPORTS_PER_SOL)
     } catch (e) {
       console.log("Airdrop Unsuccessful, likely rate-limited. Try again later.")
     }
   }
 }
 
-export async function transferSolIfNeeded(
-  sender: web3.Keypair,
-  receiver: web3.Keypair
-) {
-  const connection = new web3.Connection(
-    web3.clusterApiUrl("devnet"),
-    "confirmed"
-  )
+export async function transferSolIfNeeded(sender: Keypair, receiver: Keypair) {
+  const connection = new Connection(clusterApiUrl("devnet"), "confirmed")
 
   const balance = await connection.getBalance(receiver.publicKey)
-  console.log("Current balance is", balance / web3.LAMPORTS_PER_SOL)
+  console.log("Current balance is", balance / LAMPORTS_PER_SOL)
 
-  if (balance < 0.5 * web3.LAMPORTS_PER_SOL) {
+  if (balance < 0.5 * LAMPORTS_PER_SOL) {
     try {
-      let ix = web3.SystemProgram.transfer({
+      let ix = SystemProgram.transfer({
         fromPubkey: sender.publicKey,
         toPubkey: receiver.publicKey,
-        lamports: web3.LAMPORTS_PER_SOL,
+        lamports: LAMPORTS_PER_SOL,
       })
 
-      await web3.sendAndConfirmTransaction(
-        connection,
-        new web3.Transaction().add(ix),
-        [sender]
-      )
+      await sendAndConfirmTransaction(connection, new Transaction().add(ix), [
+        sender,
+      ])
 
       const newBalance = await connection.getBalance(receiver.publicKey)
-      console.log("New balance is", newBalance / web3.LAMPORTS_PER_SOL)
+      console.log("New balance is", newBalance / LAMPORTS_PER_SOL)
     } catch (e) {
       console.log("SOL Transfer Unsuccessful")
     }
