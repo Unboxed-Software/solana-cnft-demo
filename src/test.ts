@@ -43,6 +43,7 @@ import {
 import fetch from "node-fetch"
 import base58 from "bs58"
 import { BN } from "bn.js"
+import { uris } from "./uri"
 
 describe("Compressed NFTs", () => {
   // Helius devnet RPC URL
@@ -196,7 +197,81 @@ describe("Compressed NFTs", () => {
     }
   })
 
-  it("Mint Compressed NFT to Tree", async () => {
+  it("Mint Multiple Compressed NFT to Tree", async () => {
+    for (const uri of uris) {
+      // Extract the RGB value from the URI
+      const rgbValue = uri
+        .substring(uri.lastIndexOf("/") + 1, uri.lastIndexOf("."))
+        .replace(/_/g, ", ")
+
+      // Tree address of the tree account initialized previously
+      const treeAddress = treeKeypair.publicKey
+
+      // Compressed NFT Metadata
+      const compressedNFTMetadata: MetadataArgs = {
+        name: rgbValue,
+        symbol: "CNFT",
+        uri: uri, // uri is taken from the loop
+        creators: [{ address: payer.publicKey, verified: false, share: 100 }],
+        editionNonce: 0,
+        uses: null,
+        collection: null,
+        primarySaleHappened: false,
+        sellerFeeBasisPoints: 0,
+        isMutable: false,
+        tokenProgramVersion: TokenProgramVersion.Original,
+        tokenStandard: TokenStandard.NonFungible,
+      }
+
+      // Derive the tree authority PDA ('TreeConfig' account for the tree account)
+      const [treeAuthority] = PublicKey.findProgramAddressSync(
+        [treeAddress.toBuffer()],
+        BUBBLEGUM_PROGRAM_ID
+      )
+
+      // Create the instruction to "mint" the compressed NFT to the tree
+      const mintIx = createMintV1Instruction(
+        {
+          payer: payer.publicKey, // The account that will pay for the transaction
+          merkleTree: treeAddress, // The address of the tree account
+          treeAuthority, // The authority of the tree account, should be a PDA derived from the tree account address
+          treeDelegate: payer.publicKey, // The delegate of the tree account, should be the same as the tree creator by default
+          leafOwner: payer.publicKey, // The owner of the compressed NFT being minted to the tree
+          leafDelegate: payer.publicKey, // The delegate of the compressed NFT being minted to the tree
+          compressionProgram: SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
+          logWrapper: SPL_NOOP_PROGRAM_ID,
+        },
+        {
+          message: Object.assign(compressedNFTMetadata),
+        }
+      )
+
+      try {
+        // Create new transaction and add the instruction
+        const tx = new Transaction().add(mintIx)
+
+        // Set the fee payer for the transaction
+        tx.feePayer = payer.publicKey
+
+        // Send the transaction
+        const txSignature = await sendAndConfirmTransaction(
+          connection,
+          tx,
+          [payer],
+          { commitment: "confirmed", skipPreflight: true }
+        )
+
+        console.log(
+          `https://explorer.solana.com/tx/${txSignature}?cluster=devnet`
+        )
+      } catch (err) {
+        console.error("\nFailed to mint compressed NFT:", err)
+        break
+      }
+    }
+  })
+
+  it("Mint Single Compressed NFT to Tree", async () => {
     // Tree address of the tree account initialized previously
     const treeAddress = treeKeypair.publicKey
 
@@ -318,7 +393,7 @@ describe("Compressed NFTs", () => {
     }
   })
 
-  it("Mint Compressed NFT to Tree as part of Collection", async () => {
+  it("Mint Single Compressed NFT to Tree as part of Collection", async () => {
     // Tree address of the tree account initialized previously
     const treeAddress = treeKeypair.publicKey
 
