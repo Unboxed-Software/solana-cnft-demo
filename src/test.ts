@@ -1,9 +1,4 @@
-import {
-  airdropSolIfNeeded,
-  getOrCreateKeypair,
-  heliusApi,
-  transferSolIfNeeded,
-} from "./utils"
+import { airdropSolIfNeeded, getOrCreateKeypair, heliusApi } from "./utils"
 import {
   PublicKey,
   Connection,
@@ -11,7 +6,6 @@ import {
   sendAndConfirmTransaction,
   Transaction,
   AccountMeta,
-  clusterApiUrl,
 } from "@solana/web3.js"
 import {
   SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
