@@ -35,7 +35,19 @@ async function main() {
   const wallet2 = await getOrCreateKeypair("Wallet_2")
   airdropSolIfNeeded(wallet.publicKey)
 
-  const treeAddress = await createTree(connection, wallet)
+  const maxDepthSizePair: ValidDepthSizePair = {
+    maxDepth: 3,
+    maxBufferSize: 8,
+  }
+
+  const canopyDepth = 0
+
+  const treeAddress = await createTree(
+    connection,
+    wallet,
+    maxDepthSizePair,
+    canopyDepth
+  )
 
   const assetId1 = await mintCompressedNFT(connection, wallet, treeAddress)
   const assetId2 = await mintCompressedNFT(connection, wallet, treeAddress)
@@ -44,15 +56,13 @@ async function main() {
   await burnCompressedNFT(connection, assetId2, wallet)
 }
 
-async function createTree(connection: Connection, payer: Keypair) {
+async function createTree(
+  connection: Connection,
+  payer: Keypair,
+  maxDepthSizePair: ValidDepthSizePair,
+  canopyDepth: number
+) {
   const treeKeypair = Keypair.generate()
-
-  const maxDepthSizePair: ValidDepthSizePair = {
-    maxDepth: 3,
-    maxBufferSize: 8,
-  }
-
-  const canopyDepth = 0
 
   const [treeAuthority, _bump] = PublicKey.findProgramAddressSync(
     [treeKeypair.publicKey.toBuffer()],

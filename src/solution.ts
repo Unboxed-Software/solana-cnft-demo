@@ -38,14 +38,26 @@ async function main() {
 
   const collectionNft = await createCollectionNFT(connection, wallet)
 
-  const treeAddress = await createTree(connection, wallet)
+  const maxDepthSizePair: ValidDepthSizePair = {
+    maxDepth: 3,
+    maxBufferSize: 8,
+  }
+
+  const canopyDepth = 0
+
+  const treeAddress = await createTree(
+    connection,
+    wallet,
+    maxDepthSizePair,
+    canopyDepth
+  )
 
   await mintCompressedNFTtoCollection(
     connection,
     wallet,
     treeAddress,
     collectionNft,
-    100
+    2 ** maxDepthSizePair.maxDepth
   )
 }
 
@@ -72,15 +84,13 @@ async function createCollectionNFT(connection: Connection, payer: Keypair) {
   return collectionNft
 }
 
-async function createTree(connection: Connection, payer: Keypair) {
+async function createTree(
+  connection: Connection,
+  payer: Keypair,
+  maxDepthSizePair: ValidDepthSizePair,
+  canopyDepth: number
+) {
   const treeKeypair = Keypair.generate()
-
-  const maxDepthSizePair: ValidDepthSizePair = {
-    maxDepth: 3,
-    maxBufferSize: 8,
-  }
-
-  const canopyDepth = 0
 
   const [treeAuthority, _bump] = PublicKey.findProgramAddressSync(
     [treeKeypair.publicKey.toBuffer()],
