@@ -5,6 +5,7 @@
   "main": "index.ts",
   "scripts": {
     "start": "ts-node src/index.ts",
+    "solution": "ts-node src/solution.ts",
     "test": "ts-mocha -p tsconfig.json -t 1000000 ./src/test.ts"
   },
   "keywords": [],
