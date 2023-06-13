@@ -6,7 +6,12 @@ import {
   clusterApiUrl,
   sendAndConfirmTransaction,
 } from "@solana/web3.js"
-import { airdropSolIfNeeded, getOrCreateKeypair } from "./utils"
+import {
+  airdropSolIfNeeded,
+  getOrCreateKeypair,
+  createCompressedNFTMetadata,
+  extractAssetId,
+} from "./utils"
 import { uris } from "./uri"
 import {
   CreateCompressedNftOutput,
@@ -18,30 +23,22 @@ import {
   ValidDepthSizePair,
   createAllocTreeIx,
   SPL_NOOP_PROGRAM_ID,
-  ConcurrentMerkleTreeAccount,
-  deserializeChangeLogEventV1,
 } from "@solana/spl-account-compression"
 import {
   PROGRAM_ID as BUBBLEGUM_PROGRAM_ID,
-  MetadataArgs,
-  TokenProgramVersion,
-  TokenStandard,
   createCreateTreeInstruction,
   createMintToCollectionV1Instruction,
-  getLeafAssetId,
 } from "@metaplex-foundation/mpl-bubblegum"
 import { PROGRAM_ID as TOKEN_METADATA_PROGRAM_ID } from "@metaplex-foundation/mpl-token-metadata"
-import base58 from "bs58"
-import BN from "bn.js"
 
 async function main() {
   const connection = new Connection(clusterApiUrl("devnet"), "confirmed")
   const wallet = await getOrCreateKeypair("Wallet_1")
   airdropSolIfNeeded(wallet.publicKey)
 
-  const treeAddress = await createTree(connection, wallet)
-
   const collectionNft = await createCollectionNFT(connection, wallet)
+
+  const treeAddress = await createTree(connection, wallet)
 
   await mintCompressedNFTtoCollection(
     connection,
@@ -79,8 +76,8 @@ async function createTree(connection: Connection, payer: Keypair) {
   const treeKeypair = Keypair.generate()
 
   const maxDepthSizePair: ValidDepthSizePair = {
-    maxDepth: 14,
-    maxBufferSize: 64,
+    maxDepth: 3,
+    maxBufferSize: 8,
   }
 
   const canopyDepth = 0
@@ -222,92 +219,6 @@ async function mintCompressedNFTtoCollection(
       throw err
     }
   }
-}
-
-function createCompressedNFTMetadata(creatorPublicKey: PublicKey) {
-  // Select a random URI from uris
-  const randomUri = uris[Math.floor(Math.random() * uris.length)]
-
-  // Compressed NFT Metadata
-  const compressedNFTMetadata: MetadataArgs = {
-    name: "CNFT",
-    symbol: "CNFT",
-    uri: randomUri,
-    creators: [{ address: creatorPublicKey, verified: false, share: 100 }],
-    editionNonce: 0,
-    uses: null,
-    collection: null,
-    primarySaleHappened: false,
-    sellerFeeBasisPoints: 0,
-    isMutable: false,
-    tokenProgramVersion: TokenProgramVersion.Original,
-    tokenStandard: TokenStandard.NonFungible,
-  }
-
-  return compressedNFTMetadata
-}
-
-async function extractAssetId(
-  connection: Connection,
-  txSignature: string,
-  treeAddress: PublicKey
-) {
-  // Get the transaction info using the tx signature
-  const txInfo = await connection.getTransaction(txSignature, {
-    maxSupportedTransactionVersion: 0,
-  })
-
-  // Function to check the program Id of an instruction
-  const isProgramId = (instruction, programId) =>
-    txInfo?.transaction.message.staticAccountKeys[
-      instruction.programIdIndex
-    ].toBase58() === programId
-
-  // Find the index of the bubblegum instruction
-  const relevantIndex =
-    txInfo!.transaction.message.compiledInstructions.findIndex((instruction) =>
-      isProgramId(instruction, BUBBLEGUM_PROGRAM_ID.toBase58())
-    )
-
-  // If there's no matching Bubblegum instruction, exit
-  if (relevantIndex < 0) {
-    return
-  }
-
-  // Get the inner instructions related to the bubblegum instruction
-  const relevantInnerInstructions =
-    txInfo!.meta?.innerInstructions?.[relevantIndex].instructions
-
-  // Filter out the instructions that aren't no-ops
-  const relevantInnerIxs = relevantInnerInstructions.filter((instruction) =>
-    isProgramId(instruction, SPL_NOOP_PROGRAM_ID.toBase58())
-  )
-
-  // Locate the asset index by attempting to locate and parse the correct `relevantInnerIx`
-  let assetIndex
-  // Note: the `assetIndex` is expected to be at position `1`, and we normally expect only 2 `relevantInnerIx`
-  for (let i = relevantInnerIxs.length - 1; i >= 0; i--) {
-    try {
-      // Try to decode and deserialize the instruction
-      const changeLogEvent = deserializeChangeLogEventV1(
-        Buffer.from(base58.decode(relevantInnerIxs[i]?.data!))
-      )
-
-      // extract a successful changelog index
-      assetIndex = changeLogEvent?.index
-
-      // If we got a valid index, no need to continue the loop
-      if (assetIndex !== undefined) {
-        break
-      }
-    } catch (__) {}
-  }
-
-  const assetId = await getLeafAssetId(treeAddress, new BN(assetIndex))
-
-  console.log("Asset ID:", assetId.toBase58())
-
-  return assetId
 }
 
 main()
