@@ -7,28 +7,18 @@ import {
 } from "@solana/web3.js"
 
 import * as fs from "fs"
-import fetch from "node-fetch"
-import dotenv from "dotenv"
 import {
   SystemProgram,
   Transaction,
   sendAndConfirmTransaction,
 } from "@solana/web3.js"
 import {
-  SPL_NOOP_PROGRAM_ID,
-  deserializeChangeLogEventV1,
-} from "@solana/spl-account-compression"
-import {
-  PROGRAM_ID as BUBBLEGUM_PROGRAM_ID,
   MetadataArgs,
   TokenProgramVersion,
   TokenStandard,
-  getLeafAssetId,
 } from "@metaplex-foundation/mpl-bubblegum"
 import { uris } from "./uri"
-import base58 from "bs58"
-import BN from "bn.js"
-dotenv.config()
+import { Metaplex, Nft, keypairIdentity } from "@metaplex-foundation/js"
 
 // This function will return an existing keypair if it's present in the environment variables, or generate a new one if not
 export async function getOrCreateKeypair(walletName: string): Promise<Keypair> {
@@ -122,31 +112,19 @@ export async function transferSolIfNeeded(sender: Keypair, receiver: Keypair) {
   }
 }
 
-export async function heliusApi(method, params) {
-  const response = await fetch(process.env.RPC_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: "my-id",
-      method,
-      params,
-    }),
-  })
-  const { result } = await response.json()
-  return result
-}
+export function createNftMetadata(creator: PublicKey, index: number) {
+  if (index > uris.length) {
+    throw new Error("Index is out of range")
+  }
 
-export function createCompressedNFTMetadata(creatorPublicKey: PublicKey) {
-  // Select a random URI from uris
-  const randomUri = uris[Math.floor(Math.random() * uris.length)]
+  const uri = uris[index]
 
   // Compressed NFT Metadata
   const compressedNFTMetadata: MetadataArgs = {
     name: "CNFT",
     symbol: "CNFT",
-    uri: randomUri,
-    creators: [{ address: creatorPublicKey, verified: false, share: 100 }],
+    uri: uri,
+    creators: [{ address: creator, verified: false, share: 100 }],
     editionNonce: 0,
     uses: null,
     collection: null,
@@ -160,65 +138,62 @@ export function createCompressedNFTMetadata(creatorPublicKey: PublicKey) {
   return compressedNFTMetadata
 }
 
-export async function extractAssetId(
+export type CollectionDetails = {
+  mint: PublicKey
+  metadata: PublicKey
+  masterEditionAccount: PublicKey
+}
+
+export async function getOrCreateCollectionNFT(
   connection: Connection,
-  txSignature: string,
-  treeAddress: PublicKey
-) {
-  // Get the transaction info using the tx signature
-  const txInfo = await connection.getTransaction(txSignature, {
-    maxSupportedTransactionVersion: 0,
+  payer: Keypair
+): Promise<CollectionDetails> {
+  const envCollectionNft = process.env["COLLECTION_NFT"]
+
+  // Create Metaplex instance using payer as identity
+  const metaplex = new Metaplex(connection).use(keypairIdentity(payer))
+
+  if (envCollectionNft) {
+    const collectionNftAddress = new PublicKey(envCollectionNft)
+    const collectionNft = await metaplex
+      .nfts()
+      .findByMint({ mintAddress: collectionNftAddress })
+
+    if (collectionNft.model !== "nft") {
+      throw new Error("Invalid collection NFT")
+    }
+
+    return {
+      mint: collectionNft.mint.address,
+      metadata: collectionNft.metadataAddress,
+      masterEditionAccount: (collectionNft as Nft).edition.address,
+    }
+  }
+
+  // Select a random URI from uris
+  const randomUri = uris[Math.floor(Math.random() * uris.length)]
+
+  // Create a regular collection NFT using Metaplex
+  const collectionNft = await metaplex.nfts().create({
+    uri: randomUri,
+    name: "Collection NFT",
+    sellerFeeBasisPoints: 0,
+    updateAuthority: payer,
+    mintAuthority: payer,
+    tokenStandard: 0,
+    symbol: "Collection",
+    isMutable: true,
+    isCollection: true,
   })
 
-  // Function to check the program Id of an instruction
-  const isProgramId = (instruction, programId) =>
-    txInfo?.transaction.message.staticAccountKeys[
-      instruction.programIdIndex
-    ].toBase58() === programId
-
-  // Find the index of the bubblegum instruction
-  const relevantIndex =
-    txInfo!.transaction.message.compiledInstructions.findIndex((instruction) =>
-      isProgramId(instruction, BUBBLEGUM_PROGRAM_ID.toBase58())
-    )
-
-  // If there's no matching Bubblegum instruction, exit
-  if (relevantIndex < 0) {
-    return
-  }
-
-  // Get the inner instructions related to the bubblegum instruction
-  const relevantInnerInstructions =
-    txInfo!.meta?.innerInstructions?.[relevantIndex].instructions
-
-  // Filter out the instructions that aren't no-ops
-  const relevantInnerIxs = relevantInnerInstructions.filter((instruction) =>
-    isProgramId(instruction, SPL_NOOP_PROGRAM_ID.toBase58())
+  fs.appendFileSync(
+    ".env",
+    `\n${"COLLECTION_NFT"}=${collectionNft.mintAddress.toBase58()}`
   )
 
-  // Locate the asset index by attempting to locate and parse the correct `relevantInnerIx`
-  let assetIndex
-  // Note: the `assetIndex` is expected to be at position `1`, and we normally expect only 2 `relevantInnerIx`
-  for (let i = relevantInnerIxs.length - 1; i >= 0; i--) {
-    try {
-      // Try to decode and deserialize the instruction
-      const changeLogEvent = deserializeChangeLogEventV1(
-        Buffer.from(base58.decode(relevantInnerIxs[i]?.data!))
-      )
-
-      // extract a successful changelog index
-      assetIndex = changeLogEvent?.index
-
-      // If we got a valid index, no need to continue the loop
-      if (assetIndex !== undefined) {
-        break
-      }
-    } catch (__) {}
+  return {
+    mint: collectionNft.mintAddress,
+    metadata: collectionNft.metadataAddress,
+    masterEditionAccount: collectionNft.masterEditionAddress,
   }
-
-  const assetId = await getLeafAssetId(treeAddress, new BN(assetIndex))
-
-  console.log("Asset ID:", assetId.toBase58())
-
-  return assetId
 }

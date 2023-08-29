@@ -5,7 +5,6 @@
   "main": "index.ts",
   "scripts": {
     "start": "ts-node src/index.ts",
-    "solution": "ts-node src/solution.ts",
     "test": "ts-mocha -p tsconfig.json -t 1000000 ./src/test.ts"
   },
   "keywords": [],
@@ -21,11 +20,11 @@
   },
   "dependencies": {
     "@metaplex-foundation/js": "^0.19.4",
-    "@metaplex-foundation/mpl-bubblegum": "^0.6.2",
+    "@metaplex-foundation/mpl-bubblegum": "^0.7.0",
     "@metaplex-foundation/mpl-token-metadata": "^2.11.1",
     "@solana/spl-account-compression": "^0.1.8",
     "@solana/spl-token": "^0.3.6",
-    "@solana/web3.js": "^1.73.0",
+    "@solana/web3.js": "^1.78.4",
     "bn.js": "^5.2.1",
     "bs58": "^5.0.0",
     "dotenv": "^16.0.1",
