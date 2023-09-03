@@ -40,4 +40,6 @@ async function main() {
   airdropSolIfNeeded(wallet.publicKey)
 }
 
+// Demo Code Here
+
 main()
