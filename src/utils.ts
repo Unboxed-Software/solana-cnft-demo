@@ -4,196 +4,207 @@ import {
   LAMPORTS_PER_SOL,
   PublicKey,
   clusterApiUrl,
-} from "@solana/web3.js"
-
-import * as fs from "fs"
-import {
-  SystemProgram,
-  Transaction,
-  sendAndConfirmTransaction,
-} from "@solana/web3.js"
+} from "@solana/web3.js";
+import * as fs from "fs";
 import {
   MetadataArgs,
   TokenProgramVersion,
   TokenStandard,
-} from "@metaplex-foundation/mpl-bubblegum"
-import { uris } from "./uri"
-import { Metaplex, Nft, keypairIdentity } from "@metaplex-foundation/js"
+  UseMethod,
+} from "@metaplex-foundation/mpl-bubblegum";
+import { PublicKey as UmiPublicKey } from "@metaplex-foundation/umi-public-keys";
+import { some } from "@metaplex-foundation/umi-options";
+import {
+  createNft,
+  fetchMetadataFromSeeds,
+  findMasterEditionPda,
+  findMetadataPda,
+} from "@metaplex-foundation/mpl-token-metadata";
+import { uris } from "./uri";
+import {
+  getKeypairFromEnvironment,
+  addKeypairToEnvFile,
+  airdropIfRequired,
+  getExplorerLink,
+} from "@solana-developers/helpers";
+import {
+  generateSigner,
+  percentAmount,
+  publicKey,
+  Umi,
+} from "@metaplex-foundation/umi";
 
-// This function will return an existing keypair if it's present in the environment variables, or generate a new one if not
 export async function getOrCreateKeypair(walletName: string): Promise<Keypair> {
-  // Check if secretKey for `walletName` exist in .env file
-  const envWalletKey = process.env[walletName]
+  let keypair: Keypair;
 
-  let keypair: Keypair
+  // Try to load the keypair from the environment variable
+  try {
+    keypair = getKeypairFromEnvironment(walletName); // throws error if keypair is invalid or does not exist
+    console.log(`${walletName} PublicKey: ${keypair.publicKey.toBase58()}`);
+    console.log("Retrieved wallet from .env file successfully! ✅");
 
-  // If no secretKey exist in the .env file for `walletName`
-  if (!envWalletKey) {
-    console.log(`Writing ${walletName} keypair to .env file...`)
+  } catch (error) {
+    // If keypair doesn't exist in .env, generate a new keypair and store it
+    console.log(`Writing ${walletName} keypair to .env file...`);
 
     // Generate a new keypair
-    keypair = Keypair.generate()
+    keypair = Keypair.generate();
 
-    // Save to .env file
-    fs.appendFileSync(
-      ".env",
-      `\n${walletName}=${JSON.stringify(Array.from(keypair.secretKey))}`
-    )
-  }
-  // If secretKey already exists in the .env file
-  else {
-    // Create a Keypair from the secretKey
-    const secretKey = new Uint8Array(JSON.parse(envWalletKey))
-    keypair = Keypair.fromSecretKey(secretKey)
+    // Save keypair to .env file using helper function
+    await addKeypairToEnvFile(keypair, walletName);
+
+    console.log(`${walletName} PublicKey: ${keypair.publicKey.toBase58()}`);
+     console.log("Created wallet successfully! ✅");
   }
 
-  // Log public key and return the keypair
-  console.log(`${walletName} PublicKey: ${keypair.publicKey.toBase58()}`)
-  return keypair
+  return keypair;
 }
 
 export async function airdropSolIfNeeded(publicKey: PublicKey) {
-  const connection = new Connection(clusterApiUrl("devnet"), "confirmed")
+  const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
 
-  const balance = await connection.getBalance(publicKey)
-  console.log("Current balance is", balance / LAMPORTS_PER_SOL)
+  try {
+    const newBalance = await airdropIfRequired(
+      connection,
+      publicKey,
+      5 * LAMPORTS_PER_SOL, // Airdrop 5 SOL if needed
+      1.5 * LAMPORTS_PER_SOL // Only airdrop if the balance is below 1.5 SOL
+    );
 
-  if (balance < 1 * LAMPORTS_PER_SOL) {
-    try {
-      console.log("Airdropping 2 SOL...")
-
-      const txSignature = await connection.requestAirdrop(
-        publicKey,
-        2 * LAMPORTS_PER_SOL
-      )
-
-      const latestBlockHash = await connection.getLatestBlockhash()
-
-      await connection.confirmTransaction(
-        {
-          blockhash: latestBlockHash.blockhash,
-          lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
-          signature: txSignature,
-        },
-        "confirmed"
-      )
-
-      const newBalance = await connection.getBalance(publicKey)
-      console.log("New balance is", newBalance / LAMPORTS_PER_SOL)
-    } catch (e) {
-      console.log("Airdrop Unsuccessful, likely rate-limited. Try again later.")
-    }
+    console.log("New balance is", newBalance / LAMPORTS_PER_SOL);
+  } catch (error) {
+    console.log("Airdrop Unsuccessful, likely rate-limited. Try again later.");
   }
 }
 
-export async function transferSolIfNeeded(sender: Keypair, receiver: Keypair) {
-  const connection = new Connection(clusterApiUrl("devnet"), "confirmed")
-
-  const balance = await connection.getBalance(receiver.publicKey)
-  console.log("Current balance is", balance / LAMPORTS_PER_SOL)
-
-  if (balance < 0.5 * LAMPORTS_PER_SOL) {
-    try {
-      let ix = SystemProgram.transfer({
-        fromPubkey: sender.publicKey,
-        toPubkey: receiver.publicKey,
-        lamports: LAMPORTS_PER_SOL,
-      })
-
-      await sendAndConfirmTransaction(connection, new Transaction().add(ix), [
-        sender,
-      ])
-
-      const newBalance = await connection.getBalance(receiver.publicKey)
-      console.log("New balance is", newBalance / LAMPORTS_PER_SOL)
-    } catch (e) {
-      console.log("SOL Transfer Unsuccessful")
-    }
-  }
-}
-
-export function createNftMetadata(creator: PublicKey, index: number) {
+export function createNftMetadata(creator: UmiPublicKey, index: number, collectionMint: UmiPublicKey) {
   if (index > uris.length) {
-    throw new Error("Index is out of range")
+    throw new Error("Index is out of range");
   }
 
-  const uri = uris[index]
+  const uri = uris[index];
 
   // Compressed NFT Metadata
   const compressedNFTMetadata: MetadataArgs = {
-    name: "CNFT",
-    symbol: "CNFT",
+    name: "Collection NFT",
+    symbol: "cNFT",
     uri: uri,
     creators: [{ address: creator, verified: false, share: 100 }],
-    editionNonce: 0,
-    uses: null,
-    collection: null,
+    editionNonce: some(0),
+    uses: some({
+      useMethod: UseMethod.Single,
+      remaining: BigInt(5), // 5 uses remaining
+      total: BigInt(5), // Total of 5 uses originally
+    }),
+    collection: some({
+      key: collectionMint,
+      verified: false,
+    }),
     primarySaleHappened: false,
-    sellerFeeBasisPoints: 0,
-    isMutable: false,
+    sellerFeeBasisPoints: 10,
+    isMutable: true,
     tokenProgramVersion: TokenProgramVersion.Original,
-    tokenStandard: TokenStandard.NonFungible,
-  }
+    tokenStandard: some(TokenStandard.NonFungible),
+  };
 
-  return compressedNFTMetadata
+  return compressedNFTMetadata;
 }
 
 export type CollectionDetails = {
-  mint: PublicKey
-  metadata: PublicKey
-  masterEditionAccount: PublicKey
-}
+  mint: UmiPublicKey;
+  metadata: UmiPublicKey;
+  masterEditionAccount: UmiPublicKey;
+};
 
-export async function getOrCreateCollectionNFT(
-  connection: Connection,
-  payer: Keypair
-): Promise<CollectionDetails> {
-  const envCollectionNft = process.env["COLLECTION_NFT"]
 
-  // Create Metaplex instance using payer as identity
-  const metaplex = new Metaplex(connection).use(keypairIdentity(payer))
+export async function getOrCreateCollectionNFT(umi: Umi) {
+  const envCollectionNftAddress = process.env["COLLECTION_NFT"];
+  const collectionMint = generateSigner(umi);
 
-  if (envCollectionNft) {
-    const collectionNftAddress = new PublicKey(envCollectionNft)
-    const collectionNft = await metaplex
-      .nfts()
-      .findByMint({ mintAddress: collectionNftAddress })
+  // Helper function to log explorer links
+  const logExplorerLinks = (
+    mint: UmiPublicKey,
+    metadata: UmiPublicKey,
+    masterEdition: UmiPublicKey
+  ) => {
+    console.log(
+      "Mint Address:",
+      getExplorerLink("address", mint, "devnet"),
+      '\n'
+    );
+    console.log(
+      "Metadata Address:",
+      getExplorerLink("address", metadata, "devnet"), '\n'
+    );
+    console.log(
+      "Master Edition Account:",
+      getExplorerLink("address", masterEdition, "devnet"),
+      '\n'
+    );
+  };
 
-    if (collectionNft.model !== "nft") {
-      throw new Error("Invalid collection NFT")
-    }
+  // Helper function to fetch metadata and master edition addresses for a given mint
+  const fetchCollectionAddresses = async (
+    collectionNftAddress: UmiPublicKey
+  ) => {
+    const metadataAddress = findMetadataPda(umi, {
+      mint: collectionNftAddress,
+    })[0];
+    const masterEditionAddress = findMasterEditionPda(umi, {
+      mint: collectionNftAddress,
+    })[0];
+    return { metadataAddress, masterEditionAddress };
+  };
+
+  // If collection NFT address exists in .env, fetch its details and return
+  if (envCollectionNftAddress) {
+    const collectionNftAddress = publicKey(envCollectionNftAddress);
+    const collectionNft = await fetchMetadataFromSeeds(umi, {
+      mint: collectionNftAddress,
+    });
+    const { metadataAddress, masterEditionAddress } =
+      await fetchCollectionAddresses(collectionNftAddress);
+
+    logExplorerLinks(collectionNft.mint, metadataAddress, masterEditionAddress);
 
     return {
-      mint: collectionNft.mint.address,
-      metadata: collectionNft.metadataAddress,
-      masterEditionAccount: (collectionNft as Nft).edition.address,
-    }
+      mint: collectionNft.mint,
+      metadata: metadataAddress,
+      masterEditionAccount: masterEditionAddress,
+    };
   }
 
-  // Select a random URI from uris
-  const randomUri = uris[Math.floor(Math.random() * uris.length)]
+  // If no collection NFT exists, create a new one
+  const randomUri = uris[Math.floor(Math.random() * uris.length)];
 
-  // Create a regular collection NFT using Metaplex
-  const collectionNft = await metaplex.nfts().create({
-    uri: randomUri,
+  await createNft(umi, {
+    mint: collectionMint,
     name: "Collection NFT",
-    sellerFeeBasisPoints: 0,
-    updateAuthority: payer,
-    mintAuthority: payer,
-    tokenStandard: 0,
-    symbol: "Collection",
+    uri: randomUri,
+    authority: umi.identity,
+    updateAuthority: umi.identity.publicKey,
+    sellerFeeBasisPoints: percentAmount(10),
+    symbol: "cNFT",
     isMutable: true,
     isCollection: true,
-  })
+  }).sendAndConfirm(umi, { send: { commitment: "finalized" } });
 
-  fs.appendFileSync(
-    ".env",
-    `\n${"COLLECTION_NFT"}=${collectionNft.mintAddress.toBase58()}`
-  )
+  const collectionNftAddress = collectionMint.publicKey;
+  const collectionNft = await fetchMetadataFromSeeds(umi, {
+    mint: collectionNftAddress,
+  });
+  const { metadataAddress, masterEditionAddress } =
+    await fetchCollectionAddresses(collectionNftAddress);
 
+  // Save the new collection NFT to .env
+  fs.appendFileSync(".env", `\nCOLLECTION_NFT=${collectionNft.mint}`);
+
+  logExplorerLinks(collectionNft.mint, metadataAddress, masterEditionAddress);
+  // wrap in try catch , add success message 
   return {
-    mint: collectionNft.mintAddress,
-    metadata: collectionNft.metadataAddress,
-    masterEditionAccount: collectionNft.masterEditionAddress,
-  }
+    mint: collectionNft.mint,
+    metadata: metadataAddress,
+    masterEditionAccount: masterEditionAddress,
+  };
 }
+
