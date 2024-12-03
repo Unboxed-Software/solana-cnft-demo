@@ -1,45 +1,34 @@
-import fetch from "node-fetch"
-import {
-  AccountMeta,
-  Connection,
-  Keypair,
-  PublicKey,
-  Transaction,
-  clusterApiUrl,
-  sendAndConfirmTransaction,
-} from "@solana/web3.js"
-import {
-  airdropSolIfNeeded,
-  getOrCreateKeypair,
-  createNftMetadata,
-  CollectionDetails,
-  getOrCreateCollectionNFT,
-} from "./utils"
-import {
-  SPL_ACCOUNT_COMPRESSION_PROGRAM_ID,
-  ValidDepthSizePair,
-  createAllocTreeIx,
-  SPL_NOOP_PROGRAM_ID,
-  ConcurrentMerkleTreeAccount,
-} from "@solana/spl-account-compression"
-import {
-  PROGRAM_ID as BUBBLEGUM_PROGRAM_ID,
-  createCreateTreeInstruction,
-  createMintToCollectionV1Instruction,
-  createTransferInstruction,
-  getLeafAssetId,
-} from "@metaplex-foundation/mpl-bubblegum"
-import { PROGRAM_ID as TOKEN_METADATA_PROGRAM_ID } from "@metaplex-foundation/mpl-token-metadata"
-import { BN } from "@project-serum/anchor"
-import dotenv from "dotenv"
-dotenv.config()
+import dotenv from "dotenv";
+import { clusterApiUrl } from "@solana/web3.js";
+import { getOrCreateKeypair, airdropSolIfNeeded } from "./utils";
+import { mplBubblegum } from "@metaplex-foundation/mpl-bubblegum";
+import { dasApi } from "@metaplex-foundation/digital-asset-standard-api";
+import * as anchor from "@coral-xyz/anchor";
+import { keypairIdentity, Keypair } from "@metaplex-foundation/umi";
+import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
+import { base58 } from "@metaplex-foundation/umi/serializers";
+import { mplTokenMetadata } from "@metaplex-foundation/mpl-token-metadata";
 
-async function main() {
-  const connection = new Connection(clusterApiUrl("devnet"), "confirmed")
-  const wallet = await getOrCreateKeypair("Wallet_1")
-  airdropSolIfNeeded(wallet.publicKey)
-}
+export const initializeUmi = async () => {
+  // const {BN} = anchor.default;
 
-// Demo Code Here
+  const umi = createUmi(clusterApiUrl("devnet"));
 
-main()
+  //get keypair from .env file or create a new one
+  const wallet = await getOrCreateKeypair("Wallet1");
+
+  await airdropSolIfNeeded(wallet.publicKey);
+
+  // convert to Umi compatible keypair
+  const umiKeypair = umi.eddsa.createKeypairFromSecretKey(wallet.secretKey);
+
+  // Load the DAS API and MPL Bubblegum plugins into Umi, and set the Umi identity using a keypair,
+  // which acts as the signer for transactions.
+  umi
+    .use(keypairIdentity(umiKeypair))
+    .use(mplTokenMetadata())
+    .use(mplBubblegum())
+    .use(dasApi());
+
+  return umi;
+};
